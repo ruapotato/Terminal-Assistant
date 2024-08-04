@@ -17,7 +17,6 @@ class Node:
         self.max_tokens = max_tokens
 
     def __call__(self, input_text: str):
-        print(f"[{self.name}] Processing input:\n{input_text}")
         try:
             context_str = "\n".join([f"<|start_header_id|>{msg['role']}<|end_header_id|> {msg['content']}<|eot_id|>" for msg in self.context])
             
@@ -41,16 +40,11 @@ class Node:
                 output = response.json()['response'].strip()
                 self.context.append({"role": "user", "content": input_text})
                 self.context.append({"role": "assistant", "content": output})
-                print(f"[{self.name}] Output:\n{output}")
                 return output
             else:
-                error_message = f"Error in Ollama API call: {response.status_code} - {response.text}"
-                print(error_message)
-                return error_message
+                return f"Error in Ollama API call: {response.status_code} - {response.text}"
         except Exception as e:
-            error_message = f"Error in processing: {str(e)}"
-            print(error_message)
-            return error_message
+            return f"Error in processing: {str(e)}"
 
 class AITerminalAssistant:
     def __init__(self, model_name: str = "llama3.1:8b", max_tokens: int = 16384):
@@ -65,10 +59,18 @@ class AITerminalAssistant:
 
     def initialize_system_context(self):
         # Get installed commands
-        installed_commands = subprocess.check_output("compgen -c", shell=True, text=True).split()
+        path_dirs = os.environ.get('PATH', '').split(os.pathsep)
+        installed_commands = []
+        for dir in path_dirs:
+            if os.path.isdir(dir):
+                installed_commands.extend([f for f in os.listdir(dir) if os.access(os.path.join(dir, f), os.X_OK)])
+        installed_commands = list(set(installed_commands))  # Remove duplicates
         
         # Get system information
-        system_info = subprocess.check_output("uname -a", shell=True, text=True).strip()
+        try:
+            system_info = subprocess.check_output("uname -a", shell=True, text=True).strip()
+        except subprocess.CalledProcessError:
+            system_info = "Unable to retrieve system information"
         
         # Get desktop environment (if any)
         desktop_env = os.environ.get('XDG_CURRENT_DESKTOP', 'Unknown')
@@ -84,7 +86,7 @@ class AITerminalAssistant:
         - Current working directory: {self.current_directory}
         - System information: {system_info}
         - Desktop environment: {desktop_env}
-        - Installed commands: {', '.join(installed_commands)}
+        - Installed commands: {', '.join(installed_commands[:100])}  # Limiting to first 100 for brevity
         - Available accessibility tools: {', '.join(accessibility_tools)}
         IMPORTANT:
         - If the input is already a valid shell command, return it as is.
@@ -119,16 +121,13 @@ class AITerminalAssistant:
             self.current_directory = os.getcwd()
             
             # Use AI to interpret the user input and convert to a command if necessary
-            interpretation = self.command_executor(f"""
+            command = self.command_executor(f"""
             User Input: {user_input}
             Current Directory: {self.current_directory}
             Translate the user input into a SINGLE shell command. Return ONLY the command, nothing else.
             If the input is already a valid shell command, return it as is.
             Do not provide any explanations or comments.
-            """)
-            
-            # Extract the command from the interpretation
-            command = interpretation.strip()
+            """).strip()
             
             # Execute the actual command
             if command.startswith("cd "):
@@ -142,7 +141,8 @@ class AITerminalAssistant:
                 stdout, stderr = process.communicate()
                 result = stdout if stdout else stderr
 
-            return f"User Input: {user_input}\n\nInterpreted Command: {command}\n\nResult:\n{result}"
+            # Format the output
+            return f"{result.strip()}"
         except Exception as e:
             return self.handle_error(str(e), user_input, command)
 
