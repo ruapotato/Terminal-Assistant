@@ -22,16 +22,16 @@ AI Terminal Assistant is an intelligent command-line interface that enhances the
 ## Installation
 1. Clone this repository:
    ```
-   git clone https://github.com/your-username/ai-terminal-assistant.git
-   cd ai-terminal-assistant
+   git clone https://github.com/ruapotato/Terminal-Assistant
+   cd Terminal-Assistant
    ```
 
 2. Install the required Python library:
    ```
-   pip install requests
+   apt install python3-requests
    ```
 
-3. Ensure Ollama is installed and running with the appropriate model.
+3. Ensure Ollama is installed and running with the appropriate model "llama3.1:8b".
 
 ## Usage
 Run the script using Python:
@@ -47,6 +47,7 @@ This project is licensed under the GNU General Public License v3.0 (GPL-3.0). Se
 
 ## Acknowledgements
 - This project was developed with the assistance of Claude.ai, an AI language model by Anthropic.
+- It's based on: https://github.com/ruapotato/VirtWorker
 
 ## Disclaimer
 This assistant interacts with your real file system. Use with caution and always verify commands before execution, especially when dealing with important data or system files.
