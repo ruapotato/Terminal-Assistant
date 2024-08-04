@@ -7,6 +7,30 @@ import readline
 import glob
 import requests
 import json
+import sys
+
+# VT100 color and text format functions
+def format_text(fg, bg=None, inverted=False, bold=False):
+    return_vt = "\033[0m"  # Reset all attributes
+    if bold:
+        return_vt += "\033[1m"
+    if inverted:
+        return_vt += "\033[7m"
+    fg_codes = {'black': '30', 'red': '31', 'green': '32', 'yellow': '33', 
+                'blue': '34', 'magenta': '35', 'cyan': '36', 'white': '37'}
+    bg_codes = {'black': '40', 'red': '41', 'green': '42', 'yellow': '43', 
+                'blue': '44', 'magenta': '45', 'cyan': '46', 'white': '47'}
+    return_vt += f'\033[{fg_codes.get(fg, "37")}m'
+    if bg:
+        return_vt += f'\033[{bg_codes.get(bg, "40")}m'
+    return return_vt
+
+def reset_format():
+    return "\033[0m"
+
+def vt_write(vt100):
+    sys.stdout.write(vt100)
+    sys.stdout.flush()
 
 class Node:
     def __init__(self, model_name: str, name: str, max_tokens: int = 8192):
@@ -54,7 +78,9 @@ class AITerminalAssistant:
 
         self.command_executor = Node(model_name, "Command Executor", max_tokens=max_tokens)
         self.error_handler = Node(model_name, "Error Handler", max_tokens=max_tokens)
+        self.debugger = Node(model_name, "Debugger Expert", max_tokens=max_tokens)
 
+        self.command_history = []
         self.initialize_system_context()
 
     def initialize_system_context(self):
@@ -105,6 +131,13 @@ class AITerminalAssistant:
 
         self.error_handler.definition = "Analyze errors and provide a single, simple corrected command. Do not provide explanations."
 
+        self.debugger.definition = """
+        You are an expert debugger for shell commands and terminal operations.
+        Your task is to analyze error messages and command history to provide helpful suggestions.
+        Consider common issues like file permissions, typos, missing directories, and incorrect syntax.
+        Provide clear, concise explanations and suggest possible solutions or alternative commands.
+        """
+
     def get_accessibility_tools(self):
         accessibility_tools = []
         potential_tools = ['orca', 'festival', 'espeak', 'brltty', 'at-spi2-core']
@@ -117,10 +150,8 @@ class AITerminalAssistant:
 
     def execute_command(self, user_input: str) -> str:
         try:
-            # Update current directory
             self.current_directory = os.getcwd()
             
-            # Use AI to interpret the user input and convert to a command if necessary
             command = self.command_executor(f"""
             User Input: {user_input}
             Current Directory: {self.current_directory}
@@ -129,22 +160,57 @@ class AITerminalAssistant:
             Do not provide any explanations or comments.
             """).strip()
             
-            # Execute the actual command
+            # Format the command (inverted)
+            formatted_command = f"{format_text('white', inverted=True)}Command: {command}{reset_format()}"
+            print(formatted_command)
+
+            # Add command to history
+            self.command_history.append(command)
+            if len(self.command_history) > 10:  # Keep only last 10 commands
+                self.command_history.pop(0)
+
             if command.startswith("cd "):
-                # Handle 'cd' command separately
                 path = command.split(" ", 1)[1]
                 os.chdir(os.path.expanduser(path))
                 result = f"Changed directory to {os.getcwd()}"
+                exit_code = 0
             else:
-                # Execute other commands using subprocess
                 process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
                 stdout, stderr = process.communicate()
                 result = stdout if stdout else stderr
+                exit_code = process.returncode
 
-            # Format the output
-            return f"{result.strip()}"
+            # Format the output (white text on black background)
+            formatted_output = f"{format_text('white', bg='black')}{result.strip()}{reset_format()}"
+            
+            if exit_code != 0:
+                debug_suggestion = self.debug_error(command, result, exit_code)
+                formatted_output += f"\n\n{format_text('yellow', bold=True)}Debugging Suggestion:{reset_format}\n{debug_suggestion}"
+
+            return formatted_output
         except Exception as e:
             return self.handle_error(str(e), user_input, command)
+
+    def debug_error(self, command: str, error_output: str, exit_code: int) -> str:
+        context = f"""
+        Command History (last 10 commands):
+        {', '.join(self.command_history)}
+
+        Current Directory: {self.current_directory}
+        Last Command: {command}
+        Error Output: {error_output}
+        Exit Code: {exit_code}
+        """
+
+        debug_input = f"""
+        Analyze the following command and its error output.
+        Provide a brief explanation of what went wrong and suggest a solution or alternative approach.
+        Keep your response concise and focused on solving the immediate issue.
+
+        {context}
+        """
+
+        return self.debugger(debug_input)
 
     def handle_error(self, error: str, user_input: str, command: str) -> str:
         error_analysis = self.error_handler(f"""
@@ -155,14 +221,17 @@ class AITerminalAssistant:
         Provide ONLY a single, simple corrected command. No explanations.
         """)
         
-        print(f"Error occurred: {error}")
-        print(f"Suggested command: {error_analysis}")
+        error_msg = f"{format_text('red', bold=True)}Error occurred: {error}{reset_format()}"
+        suggestion_msg = f"{format_text('yellow', bold=True)}Suggested command: {error_analysis}{reset_format()}"
         
-        confirmation = input(f"Would you like to execute the suggested command: {error_analysis}? (y/n) ")
+        print(error_msg)
+        print(suggestion_msg)
+        
+        confirmation = input(f"Would you like to execute the suggested command? (y/n) ")
         if confirmation.lower() == 'y':
             return self.execute_command(error_analysis)
         
-        return "Command execution aborted."
+        return f"{format_text('red', bold=True)}Command execution aborted.{reset_format()}"
 
 def setup_readline():
     # Enable tab completion
@@ -179,25 +248,24 @@ def main():
     assistant = AITerminalAssistant()
     setup_readline()
     
-    print("Welcome to the AI-Powered Terminal Assistant!")
+    print(f"{format_text('green', bold=True)}Welcome to the AI-Powered Terminal Assistant!")
     print("This assistant interacts with your real file system. Use with caution.")
     print("You can use natural language queries or standard shell commands.")
-    print("Type 'exit' to quit.")
+    print(f"Type 'exit' to quit.{reset_format()}")
 
     while True:
         try:
-            user_input = input(f"{os.getcwd()}$ ")
+            user_input = input(f"{format_text('green', bold=True)}{os.getcwd()}$ {reset_format()}")
             if user_input.lower() == 'exit':
                 break
 
-            # Execute command or process natural language query
             result = assistant.execute_command(user_input)
             print(result)
 
         except KeyboardInterrupt:
             print("\nKeyboardInterrupt")
 
-    print("Goodbye!")
+    print(f"{format_text('green', bold=True)}Goodbye!{reset_format()}")
 
 if __name__ == "__main__":
     main()
