@@ -28,7 +28,7 @@ AI Terminal Assistant is an intelligent command-line interface that enhances the
 
 2. Install the required Python library:
    ```
-   apt install python3-requests
+   apt install python3-requests python3-pyperclip
    ```
 
 3. Ensure Ollama is installed and running with the appropriate model "llama3.1:8b".

@@ -1,36 +1,40 @@
-import os
-import subprocess
-import shlex
+import fcntl
 import getpass
-from typing import List, Tuple
-import readline
 import glob
-import requests
 import json
+import os
+import pty
+import pyperclip
+import readline
+import requests
+import select
+import signal
+import struct
+import subprocess
 import sys
+import termios
+import tty
 
-# VT100 color and text format functions
+from typing import List, Tuple
+
 def format_text(fg, bg=None, inverted=False, bold=False):
-    return_vt = "\033[0m"  # Reset all attributes
+    reset = "\033[0m"
+    result = reset
     if bold:
-        return_vt += "\033[1m"
+        result += "\033[1m"
     if inverted:
-        return_vt += "\033[7m"
+        result += "\033[7m"
     fg_codes = {'black': '30', 'red': '31', 'green': '32', 'yellow': '33', 
                 'blue': '34', 'magenta': '35', 'cyan': '36', 'white': '37'}
     bg_codes = {'black': '40', 'red': '41', 'green': '42', 'yellow': '43', 
                 'blue': '44', 'magenta': '45', 'cyan': '46', 'white': '47'}
-    return_vt += f'\033[{fg_codes.get(fg, "37")}m'
+    result += f'\033[{fg_codes.get(fg, "37")}m'
     if bg:
-        return_vt += f'\033[{bg_codes.get(bg, "40")}m'
-    return return_vt
+        result += f'\033[{bg_codes.get(bg, "40")}m'
+    return result
 
 def reset_format():
     return "\033[0m"
-
-def vt_write(vt100):
-    sys.stdout.write(vt100)
-    sys.stdout.flush()
 
 class Node:
     def __init__(self, model_name: str, name: str, max_tokens: int = 8192):
@@ -40,14 +44,21 @@ class Node:
         self.context = []
         self.max_tokens = max_tokens
 
-    def __call__(self, input_text: str):
+    def __call__(self, input_text: str, additional_data: dict = None):
         try:
             context_str = "\n".join([f"<|start_header_id|>{msg['role']}<|end_header_id|> {msg['content']}<|eot_id|>" for msg in self.context])
             
             prompt = f"""<|start_header_id|>system<|end_header_id|>{self.definition}<|eot_id|>
 {context_str}
-<|start_header_id|>user<|end_header_id|>{input_text}<|eot_id|>
-<|start_header_id|>assistant<|end_header_id|>"""
+<|start_header_id|>user<|end_header_id|>{input_text}<|eot_id|>"""
+
+            if additional_data:
+                prompt += "\n<|start_header_id|>system<|end_header_id|>Additional data:\n"
+                for key, value in additional_data.items():
+                    prompt += f"{key}: {value}\n"
+                prompt += "<|eot_id|>"
+
+            prompt += "\n<|start_header_id|>assistant<|end_header_id|>"
 
             response = requests.post('http://localhost:11434/api/generate', 
                                      json={
@@ -70,6 +81,30 @@ class Node:
         except Exception as e:
             return f"Error in processing: {str(e)}"
 
+class DataGatherer:
+    @staticmethod
+    def get_clipboard_content():
+        try:
+            return pyperclip.paste()
+        except:
+            return "Error: Unable to access clipboard"
+
+    @staticmethod
+    def get_file_content(file_path):
+        try:
+            with open(file_path, 'r') as file:
+                return file.read()
+        except Exception as e:
+            return f"Error reading file: {str(e)}"
+
+    @staticmethod
+    def execute_command(command):
+        try:
+            result = subprocess.run(command, capture_output=True, text=True, shell=True)
+            return result.stdout if result.returncode == 0 else f"Error: {result.stderr}"
+        except Exception as e:
+            return f"Error executing command: {str(e)}"
+
 class AITerminalAssistant:
     def __init__(self, model_name: str = "llama3.1:8b", max_tokens: int = 16384):
         self.username = getpass.getuser()
@@ -79,29 +114,28 @@ class AITerminalAssistant:
         self.command_executor = Node(model_name, "Command Executor", max_tokens=max_tokens)
         self.error_handler = Node(model_name, "Error Handler", max_tokens=max_tokens)
         self.debugger = Node(model_name, "Debugger Expert", max_tokens=max_tokens)
+        self.merger = Node(model_name, "Code Merger", max_tokens=max_tokens)
+        self.question_answerer = Node(model_name, "Question Answerer", max_tokens=max_tokens)
+        self.data_gatherer = DataGatherer()
 
         self.command_history = []
         self.initialize_system_context()
 
     def initialize_system_context(self):
-        # Get installed commands
         path_dirs = os.environ.get('PATH', '').split(os.pathsep)
         installed_commands = []
         for dir in path_dirs:
             if os.path.isdir(dir):
                 installed_commands.extend([f for f in os.listdir(dir) if os.access(os.path.join(dir, f), os.X_OK)])
-        installed_commands = list(set(installed_commands))  # Remove duplicates
+        installed_commands = list(set(installed_commands))
         
-        # Get system information
         try:
             system_info = subprocess.check_output("uname -a", shell=True, text=True).strip()
         except subprocess.CalledProcessError:
             system_info = "Unable to retrieve system information"
         
-        # Get desktop environment (if any)
         desktop_env = os.environ.get('XDG_CURRENT_DESKTOP', 'Unknown')
         
-        # Get accessibility tools
         accessibility_tools = self.get_accessibility_tools()
 
         self.command_executor.definition = f"""
@@ -112,7 +146,7 @@ class AITerminalAssistant:
         - Current working directory: {self.current_directory}
         - System information: {system_info}
         - Desktop environment: {desktop_env}
-        - Installed commands: {', '.join(installed_commands[:100])}  # Limiting to first 100 for brevity
+        - Installed commands: {', '.join(installed_commands[:100])}
         - Available accessibility tools: {', '.join(accessibility_tools)}
         IMPORTANT:
         - If the input is already a valid shell command, return it as is.
@@ -127,6 +161,8 @@ class AITerminalAssistant:
         - DO NOT combine multiple commands using ';', '&&', or '|'.
         - DO NOT provide any explanations or comments. Return ONLY the command.
         - For accessibility-related queries, use the appropriate tools from the list provided.
+        - Always use the actual filenames provided in the additional data, not placeholders.
+        - Ensure to properly escape any special characters to maintain shell compatibility.
         """
 
         self.error_handler.definition = "Analyze errors and provide a single, simple corrected command. Do not provide explanations."
@@ -136,6 +172,29 @@ class AITerminalAssistant:
         Your task is to analyze error messages and command history to provide helpful suggestions.
         Consider common issues like file permissions, typos, missing directories, and incorrect syntax.
         Provide clear, concise explanations and suggest possible solutions or alternative commands.
+        """
+
+        self.merger.definition = """
+        You are an expert at merging code and applying feedback. Given an existing Python script and feedback or 
+        modifications, your task is to create an updated version of the script that incorporates the feedback.
+        Follow these guidelines strictly:
+        1. Preserve ALL existing code. Do not remove or modify any existing code unless explicitly instructed to do so.
+        2. Analyze both the existing code and the feedback carefully.
+        3. Only add or modify code that is directly related to the feedback.
+        4. If the feedback suggests changes to a specific function, only update that function.
+        5. Maintain consistent coding style and follow Python best practices.
+        6. If the feedback is unclear or could be interpreted in multiple ways, choose the most conservative interpretation.
+        7. Provide the entire updated Python script as your response, including ALL unchanged parts.
+        8. Add a comment '# Updated based on feedback' above any function or section you modify or add.
+        9. If you're unsure about a change, err on the side of preserving the existing code.
+        """
+
+        self.question_answerer.definition = """
+        You are an expert at answering questions related to shell commands, file systems, and general computing topics.
+        Your task is to provide clear, concise, and accurate answers to user questions.
+        Use the context provided, including command history and current directory, to give more relevant answers.
+        If a question is ambiguous, ask for clarification.
+        Provide examples when appropriate to illustrate your points.
         """
 
     def get_accessibility_tools(self):
@@ -148,25 +207,148 @@ class AITerminalAssistant:
         
         return accessibility_tools
 
+    def execute_command_with_live_output(self, command: str) -> Tuple[str, str, int]:
+        interactive_commands = ['top', 'nano', 'vim', 'less', 'more']
+        is_interactive = any(command.strip().startswith(cmd) for cmd in interactive_commands)
+
+        if is_interactive:
+            return self.execute_interactive_command(command)
+
+        if command.strip().startswith('sudo'):
+            command = f"sudo -S {command[5:]}"
+        
+        process = subprocess.Popen(
+            command,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            stdin=subprocess.PIPE,
+            shell=True,
+            universal_newlines=True,
+            preexec_fn=os.setsid
+        )
+
+        for pipe in [process.stdout, process.stderr]:
+            flags = fcntl.fcntl(pipe, fcntl.F_GETFL)
+            fcntl.fcntl(pipe, fcntl.F_SETFL, flags | os.O_NONBLOCK)
+
+        stdout_data, stderr_data = [], []
+
+        try:
+            if command.startswith('sudo -S'):
+                password = getpass.getpass("Enter sudo password: ")
+                process.stdin.write(f"{password}\n")
+                process.stdin.flush()
+
+            while True:
+                ready, _, _ = select.select([process.stdout, process.stderr], [], [], 0.1)
+                
+                if process.stdout in ready:
+                    stdout = process.stdout.read()
+                    if stdout:
+                        print(stdout, end='', flush=True)
+                        stdout_data.append(stdout)
+                
+                if process.stderr in ready:
+                    stderr = process.stderr.read()
+                    if stderr:
+                        print(f"{format_text('red')}{stderr}{reset_format()}", end='', flush=True)
+                        stderr_data.append(stderr)
+                
+                if process.poll() is not None:
+                    break
+
+            stdout, stderr = process.communicate(timeout=0.1)
+            if stdout:
+                print(stdout, end='', flush=True)
+                stdout_data.append(stdout)
+            if stderr:
+                print(f"{format_text('red')}{stderr}{reset_format()}", end='', flush=True)
+                stderr_data.append(stderr)
+
+        except KeyboardInterrupt:
+            os.killpg(os.getpgid(process.pid), signal.SIGINT)
+            print("\nCommand interrupted by user.")
+        except Exception as e:
+            print(f"{format_text('red')}Error during command execution: {str(e)}{reset_format()}")
+        finally:
+            try:
+                os.killpg(os.getpgid(process.pid), signal.SIGTERM)
+            except:
+                pass
+        
+        exit_code = process.returncode if process.returncode is not None else -1
+        full_stdout = ''.join(stdout_data)
+        full_stderr = ''.join(stderr_data)
+
+        return full_stdout, full_stderr, exit_code
+
+    def execute_interactive_command(self, command: str) -> Tuple[str, str, int]:
+        try:
+            pid, fd = pty.fork()
+
+            if pid == 0:  # Child process
+                os.execvp(command.split()[0], command.split())
+            else:  # Parent process
+                old_term = termios.tcgetattr(sys.stdin)
+                tty.setraw(sys.stdin.fileno())
+
+                rows, cols = struct.unpack('hh', fcntl.ioctl(sys.stdin, termios.TIOCGWINSZ, b'1234'))
+
+                try:
+                    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack('hh', rows, cols))
+
+                    while True:
+                        try:
+                            data = os.read(fd, 1024)
+                            if not data:
+                                break
+                            sys.stdout.write(data.decode())
+                            sys.stdout.flush()
+                        except OSError:
+                            break
+
+                        if select.select([sys.stdin], [], [], 0)[0]:
+                            input_data = sys.stdin.read(1)
+                            os.write(fd, input_data.encode())
+
+                finally:
+                    termios.tcsetattr(sys.stdin, termios.TCSAFLUSH, old_term)
+
+            _, exit_status = os.waitpid(pid, 0)
+            exit_code = exit_status >> 8
+
+            return "", "", exit_code
+
+        except Exception as e:
+            print(f"{format_text('red')}Error during interactive command execution: {str(e)}{reset_format()}")
+            return "", str(e), -1
+
     def execute_command(self, user_input: str) -> str:
         try:
             self.current_directory = os.getcwd()
             
+            if user_input.startswith('?') or user_input.endswith('?'):
+                return self.answer_question(user_input)
+
+            if user_input.startswith('!'):
+                return self.run_direct_command(user_input[1:])
+            
+            additional_data = self.gather_additional_data(user_input)
+
             command = self.command_executor(f"""
             User Input: {user_input}
             Current Directory: {self.current_directory}
             Translate the user input into a SINGLE shell command. Return ONLY the command, nothing else.
             If the input is already a valid shell command, return it as is.
             Do not provide any explanations or comments.
-            """).strip()
+            Use the actual filenames and content provided in the additional data.
+            """, additional_data=additional_data).strip()
             
-            # Format the command (inverted)
             formatted_command = f"{format_text('white', inverted=True)}Command: {command}{reset_format()}"
             print(formatted_command)
 
-            # Add command to history
             self.command_history.append(command)
-            if len(self.command_history) > 10:  # Keep only last 10 commands
+            if len(self.command_history) > 10:
                 self.command_history.pop(0)
 
             if command.startswith("cd "):
@@ -175,21 +357,76 @@ class AITerminalAssistant:
                 result = f"Changed directory to {os.getcwd()}"
                 exit_code = 0
             else:
-                process = subprocess.Popen(command, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, shell=True)
-                stdout, stderr = process.communicate()
-                result = stdout if stdout else stderr
-                exit_code = process.returncode
+                stdout, stderr, exit_code = self.execute_command_with_live_output(command)
+                result = ""
 
-            # Format the output (white text on black background)
-            formatted_output = f"{format_text('white', bg='black')}{result.strip()}{reset_format()}"
-            
             if exit_code != 0:
-                debug_suggestion = self.debug_error(command, result, exit_code)
-                formatted_output += f"\n\n{format_text('yellow', bold=True)}Debugging Suggestion:{reset_format}\n{debug_suggestion}"
+                debug_suggestion = self.debug_error(command, stderr, exit_code)
+                result += f"\n\n{format_text('yellow', bold=True)}Debugging Suggestion:{reset_format}\n{debug_suggestion}"
 
-            return formatted_output
+            return result.strip()
         except Exception as e:
             return self.handle_error(str(e), user_input, command)
+
+    def run_direct_command(self, command: str) -> str:
+        try:
+            formatted_command = f"{format_text('white', inverted=True)}Direct Command: {command}{reset_format()}"
+            print(formatted_command)
+
+            self.command_history.append(command)
+            if len(self.command_history) > 10:
+                self.command_history.pop(0)
+
+            stdout, stderr, exit_code = self.execute_command_with_live_output(command)
+
+            result = ""
+
+            if exit_code != 0:
+                debug_suggestion = self.debug_error(command, stderr, exit_code)
+                result += f"\n\n{format_text('yellow', bold=True)}Debugging Suggestion:{reset_format}\n{debug_suggestion}"
+
+            return result.strip()
+        except Exception as e:
+            return self.handle_error(str(e), command, command)
+
+    def answer_question(self, question: str) -> str:
+        context = f"""
+        Command History (last 10 commands):
+        {', '.join(self.command_history)}
+
+        Current Directory: {self.current_directory}
+        """
+
+        answer = self.question_answerer(f"""
+        Question: {question.strip('?')}
+
+        Context:
+        {context}
+
+        Please provide a clear and concise answer to the question, taking into account the given context.
+        """)
+
+        return f"{format_text('cyan', bold=True)}Answer:{reset_format}\n{answer}"
+
+    def gather_additional_data(self, user_input: str) -> dict:
+        additional_data = {}
+        
+        if "clipboard" in user_input.lower():
+            clipboard_content = self.data_gatherer.get_clipboard_content()
+            additional_data["clipboard_content"] = clipboard_content
+
+        file_keywords = ["file", "content", "read", "merge"]
+        if any(keyword in user_input.lower() for keyword in file_keywords):
+            words = user_input.split()
+            for word in words:
+                if os.path.isfile(word):
+                    with open(word, 'r') as file:
+                        file_content = file.read()
+                    additional_data["file_content"] = file_content
+                    additional_data["target_file"] = word
+                    break
+        
+        return additional_data
 
     def debug_error(self, command: str, error_output: str, exit_code: int) -> str:
         context = f"""
@@ -234,10 +471,8 @@ class AITerminalAssistant:
         return f"{format_text('red', bold=True)}Command execution aborted.{reset_format()}"
 
 def setup_readline():
-    # Enable tab completion
     readline.parse_and_bind('tab: complete')
     
-    # Set up auto-completion function
     def complete(text, state):
         return (glob.glob(os.path.expanduser(text) + '*') + [None])[state]
     
@@ -248,9 +483,11 @@ def main():
     assistant = AITerminalAssistant()
     setup_readline()
     
-    print(f"{format_text('green', bold=True)}Welcome to the AI-Powered Terminal Assistant!")
-    print("This assistant interacts with your real file system. Use with caution.")
+    print(f"{format_text('green', bold=True)}Welcome to the Enhanced AI-Powered Terminal Assistant!")
+    print("This assistant interacts with your real file system and can gather additional data. Use with caution.")
     print("You can use natural language queries or standard shell commands.")
+    print("Start or end your input with '?' to ask a question.")
+    print("Start your input with '!' to execute a command directly without processing.")
     print(f"Type 'exit' to quit.{reset_format()}")
 
     while True:
