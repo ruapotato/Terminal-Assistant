@@ -14,6 +14,7 @@ import subprocess
 import sys
 import termios
 import tty
+import shlex
 
 from typing import List, Tuple
 
@@ -163,6 +164,8 @@ class AITerminalAssistant:
         - For accessibility-related queries, use the appropriate tools from the list provided.
         - Always use the actual filenames provided in the additional data, not placeholders.
         - Ensure to properly escape any special characters to maintain shell compatibility.
+        - NEVER interpret 'clear' as anything other than the 'clear' command.
+        - For potentially destructive commands (rm, dd, etc.), prefix with 'CONFIRM:'.
         """
 
         self.error_handler.definition = "Analyze errors and provide a single, simple corrected command. Do not provide explanations."
@@ -330,6 +333,10 @@ class AITerminalAssistant:
             if user_input.startswith('?') or user_input.endswith('?'):
                 return self.answer_question(user_input)
 
+            if user_input.lower().strip() == 'clear':
+                os.system('clear')
+                return ""
+
             if user_input.startswith('!'):
                 return self.run_direct_command(user_input[1:])
             
@@ -344,6 +351,12 @@ class AITerminalAssistant:
             Use the actual filenames and content provided in the additional data.
             """, additional_data=additional_data).strip()
             
+            if command.startswith("CONFIRM:"):
+                confirmation = input(f"{format_text('yellow', bold=True)}Warning: This command may be destructive. Are you sure you want to run '{command[8:]}'? (y/n) {reset_format()}")
+                if confirmation.lower() != 'y':
+                    return f"{format_text('red', bold=True)}Command execution aborted.{reset_format()}"
+                command = command[8:]
+
             formatted_command = f"{format_text('white', inverted=True)}Command: {command}{reset_format()}"
             print(formatted_command)
 
@@ -479,6 +492,13 @@ def setup_readline():
     readline.set_completer(complete)
     readline.set_completer_delims(' \t\n;')
 
+def get_terminal_size():
+    try:
+        columns, rows = os.get_terminal_size(0)
+    except OSError:
+        columns, rows = os.get_terminal_size(1)
+    return columns, rows
+
 def main():
     assistant = AITerminalAssistant()
     setup_readline()
@@ -492,7 +512,13 @@ def main():
 
     while True:
         try:
-            user_input = input(f"{format_text('green', bold=True)}{os.getcwd()}$ {reset_format()}")
+            columns, _ = get_terminal_size()
+            prompt = f"{format_text('green', bold=True)}{os.getcwd()}$ {reset_format()}"
+            user_input = input(prompt)
+
+            if len(prompt) + len(user_input) > columns:
+                print()  # Move to the next line if input is too long
+
             if user_input.lower() == 'exit':
                 break
 
