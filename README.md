@@ -1,3 +1,4 @@
+#No longer developed, superseded by: https://github.com/ruapotato/Voice-Command
 # AI Terminal Assistant
 
 ## Author
